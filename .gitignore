@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# 训练输出（outputs/ 整体忽略，保留目录占位）
+outputs/*/
+outputs/latest
+
+# cases 内训练产物
+cases/*/outputs/
+cases/*/__pycache__/
+
+# 日志
+setup_env.log
+
+# Claude IDE
+.claude/

@@ -7,7 +7,7 @@ set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_DIR="/home/featurize/work/env_conda/nemo"
+ENV_DIR="${ENV_DIR:-/home/featurize/work/env_conda/nemo}"
 PYTHON="${ENV_DIR}/bin/python"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${SCRIPT_DIR}/outputs/${TIMESTAMP}"

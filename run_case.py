@@ -37,6 +37,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir",   required=True,  help="Output directory for this run")
     p.add_argument("--max-steps", type=int, default=10_000, help="Training steps (default 10000)")
     p.add_argument("--seed",      type=int, default=42,     help="Random seed (default 42)")
+    p.add_argument("--mode",      choices=["baseline", "param"], default="baseline",
+                   help="baseline=original heat_sink.py; param=heat_sink_param.py (default baseline)")
     return p.parse_args()
 
 
@@ -173,6 +175,49 @@ def run_heat_sink(case_dir: str, max_steps: int, out_dir: str) -> None:
 
     if result.returncode != 0:
         raise RuntimeError(f"heat_sink.py exited with code {result.returncode}")
+
+
+def run_heat_sink_param(case_dir: str, max_steps: int, out_dir: str) -> None:
+    """Run heat_sink_param.py as a subprocess from within case_dir.
+
+    Using subprocess instead of importlib ensures Hydra resolves config_path="conf"
+    relative to the script file, exactly as if the user ran it directly.
+    """
+    case_dir = os.path.abspath(case_dir)
+    heat_sink_path = os.path.join(case_dir, "heat_sink_param.py")
+
+    if not os.path.isfile(heat_sink_path):
+        raise FileNotFoundError(f"heat_sink_param.py not found at {heat_sink_path}")
+
+    freq = max(100, max_steps // 20)
+    hydra_run_dir = "outputs/run_param"
+
+    overrides = [
+        f"training.max_steps={max_steps}",
+        f"training.rec_monitor_freq={freq}",
+        f"training.rec_validation_freq={freq}",
+        f"training.rec_inference_freq={freq}",
+        f"hydra.run.dir={hydra_run_dir}",
+    ]
+
+    cmd = [sys.executable, heat_sink_path] + overrides
+    print(f"[run_case] Running: {' '.join(cmd)}")
+    print(f"[run_case] cwd: {case_dir}")
+
+    result = subprocess.run(cmd, cwd=case_dir)
+
+    # Copy hydra outputs from case_dir into out_dir for archival
+    src = os.path.join(case_dir, hydra_run_dir)
+    if os.path.isdir(src):
+        import shutil
+        dst = os.path.join(out_dir, "hydra_outputs")
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        print(f"[run_case] Copied hydra outputs: {src} → {dst}")
+
+    if result.returncode != 0:
+        raise RuntimeError(f"heat_sink_param.py exited with code {result.returncode}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -426,13 +471,15 @@ def generate_baseline_report(
     out_dir: str,
     elapsed_sec: float,
     run_error: str | None,
+    mode: str = "baseline",
 ) -> str:
     """Write baseline_report.md and return its path."""
     report_path = os.path.join(out_dir, "baseline_report.md")
     lines: list[str] = []
     w = lines.append
 
-    w("# PhysicsNeMo Sym — Baseline Report")
+    title_tag = " [Parameterized]" if mode == "param" else ""
+    w(f"# PhysicsNeMo Sym — Baseline Report{title_tag}")
     w("")
     w(f"**Generated:** {datetime.utcnow().isoformat()}Z")
     w("")
@@ -590,7 +637,7 @@ def main() -> None:
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"[run_case] Output directory: {out_dir}")
-    print(f"[run_case] max_steps={args.max_steps}, seed={args.seed}")
+    print(f"[run_case] mode={args.mode}, max_steps={args.max_steps}, seed={args.seed}")
 
     # Collect metadata
     meta = collect_metadata(args, start_time)
@@ -599,12 +646,17 @@ def main() -> None:
         json.dump(meta, f, indent=2)
     print(f"[run_case] Metadata saved: {meta_path}")
 
-    # Run heat_sink (capture error for report but don't crash immediately)
+    # Run training (capture error for report but don't crash immediately)
     run_error: str | None = None
     try:
-        print(f"[run_case] Starting heat_sink training...")
-        run_heat_sink(args.case_dir, args.max_steps, out_dir)
-        print(f"[run_case] heat_sink training complete.")
+        if args.mode == "param":
+            print(f"[run_case] Starting heat_sink_param training...")
+            run_heat_sink_param(args.case_dir, args.max_steps, out_dir)
+            print(f"[run_case] heat_sink_param training complete.")
+        else:
+            print(f"[run_case] Starting heat_sink training...")
+            run_heat_sink(args.case_dir, args.max_steps, out_dir)
+            print(f"[run_case] heat_sink training complete.")
     except Exception as e:
         run_error = str(e)
         print(f"[run_case] ERROR during training: {e}")
@@ -635,7 +687,8 @@ def main() -> None:
     # Generate report
     print("[run_case] Writing baseline report...")
     report_path = generate_baseline_report(
-        meta, monitors, gpu_stats, charts, out_dir, elapsed, run_error
+        meta, monitors, gpu_stats, charts, out_dir, elapsed, run_error,
+        mode=args.mode,
     )
     print(f"[run_case] Report: {report_path}")
 

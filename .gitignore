@@ -15,3 +15,9 @@ setup_env.log
 
 # Claude IDE
 .claude/
+
+# TensorBoard 日志（case 目录中）
+cases/*/events.out.tfevents.*
+
+# 可视化输出图像（case 目录中）
+cases/*/field_vel*.png

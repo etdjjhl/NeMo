@@ -11,15 +11,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="/home/featurize/work/env_conda/nemo"
 PYTHON="${ENV_DIR}/bin/python"
+MAX_STEPS="${MAX_STEPS:-10000}"
+MODE="${MODE:-baseline}"   # baseline | param
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-OUT_DIR="${SCRIPT_DIR}/outputs/${TIMESTAMP}"
-LATEST_LINK="${SCRIPT_DIR}/outputs/latest"
+OUT_DIR="${SCRIPT_DIR}/outputs/${MODE}/${TIMESTAMP}"
+LATEST_LINK="${SCRIPT_DIR}/outputs/${MODE}/latest"
 CASE_SOURCE_REPO="https://github.com/NVIDIA/modulus-sym"
 CASE_SUBDIR="examples/three_fin_2d"
 CASES_DIR="${SCRIPT_DIR}/cases"
 CASE_DIR="${CASES_DIR}/three_fin_2d"
-MAX_STEPS="${MAX_STEPS:-10000}"
-MODE="${MODE:-baseline}"   # baseline | param
 
 # ── 1. Pre-flight checks ──────────────────────────────────────────────────────
 echo "=========================================="

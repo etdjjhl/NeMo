@@ -73,6 +73,7 @@ def collect_metadata(args: argparse.Namespace, start_time: float) -> dict:
         "params": {
             "max_steps": args.max_steps,
             "seed": args.seed,
+            "mode": args.mode,
             "case_dir": str(args.case_dir),
             "out_dir": str(args.out_dir),
         },
@@ -665,9 +666,22 @@ def main() -> None:
     elapsed = time.time() - start_time
     print(f"[run_case] Elapsed: {elapsed:.1f} s")
 
-    # Update metadata with elapsed time
+    # Read actual training step count from checkpoint
+    optim_path = os.path.join(out_dir, "hydra_outputs", "optim_checkpoint.0.pth")
+    actual_step = None
+    if os.path.isfile(optim_path):
+        import torch
+        ckpt = torch.load(optim_path, map_location="cpu", weights_only=False)
+        actual_step = ckpt.get("step")
+        print(f"[run_case] Checkpoint step: {actual_step}")
+
+    # Update metadata with elapsed time and training steps
     meta["elapsed_sec"] = elapsed
     meta["run_error"] = run_error
+    meta["training_steps"] = {
+        "requested": args.max_steps,
+        "actual": actual_step,
+    }
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
 

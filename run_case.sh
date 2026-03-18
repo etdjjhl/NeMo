@@ -5,6 +5,7 @@
 #   MAX_STEPS=500000 bash run_case.sh             # baseline full run
 #   MODE=param bash run_case.sh                   # parameterized 10k steps
 #   MODE=param MAX_STEPS=300000 bash run_case.sh  # recommended full param run
+#   LOCAL_DISK=/home/featurize/data MAX_STEPS=50000 bash run_case.sh  # local disk acceleration
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
@@ -13,6 +14,7 @@ ENV_DIR="/home/featurize/work/env_conda/nemo"
 PYTHON="${ENV_DIR}/bin/python"
 MAX_STEPS="${MAX_STEPS:-10000}"
 MODE="${MODE:-baseline}"   # baseline | param
+LOCAL_DISK="${LOCAL_DISK:-}"   # empty=default behavior; set to fast local path (e.g. /home/featurize/data)
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${SCRIPT_DIR}/outputs/${MODE}/${TIMESTAMP}"
 LATEST_LINK="${SCRIPT_DIR}/outputs/${MODE}/latest"
@@ -124,6 +126,9 @@ echo "  Python     : $PYTHON"
 echo "  Case dir   : $CASE_DIR"
 echo "  Output dir : $OUT_DIR"
 echo "  Mode       : $MODE"
+if [[ -n "$LOCAL_DISK" ]]; then
+    echo "  Local disk : $LOCAL_DISK"
+fi
 echo ""
 
 "$PYTHON" "${SCRIPT_DIR}/run_case.py" \
@@ -131,7 +136,8 @@ echo ""
     --out-dir   "$OUT_DIR" \
     --max-steps "$MAX_STEPS" \
     --seed      42 \
-    --mode      "$MODE"
+    --mode      "$MODE" \
+    --local-disk "$LOCAL_DISK"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 echo ""

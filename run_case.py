@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 import random
+import shutil
 import subprocess
 import sys
 import time
@@ -39,6 +40,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed",      type=int, default=42,     help="Random seed (default 42)")
     p.add_argument("--mode",      choices=["baseline", "param"], default="baseline",
                    help="baseline=original heat_sink.py; param=heat_sink_param.py (default baseline)")
+    p.add_argument("--local-disk", default="",
+                   help="Fast local disk path (e.g. /home/featurize/data). "
+                        "Training outputs symlinked there for I/O speed, copied back after.")
     return p.parse_args()
 
 
@@ -129,10 +133,78 @@ def collect_metadata(args: argparse.Namespace, start_time: float) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4 & 5. Run heat_sink via subprocess (most reliable for Hydra config resolution)
+# 4. Local-disk symlink helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_heat_sink(case_dir: str, max_steps: int, out_dir: str) -> None:
+def _setup_local_symlink(
+    case_dir: str, hydra_run_dir: str, local_disk: str, mode_tag: str
+) -> str | None:
+    """Create symlink from case_dir/outputs/run → local_disk/nemo_train/<tag>/run.
+
+    Returns the local_train_dir path if symlink was created, None otherwise.
+    """
+    if not local_disk:
+        return None
+
+    run_name = os.path.basename(hydra_run_dir)  # "run" or "run_param"
+    local_train_dir = os.path.join(local_disk, "nemo_train", mode_tag, run_name)
+    link_path = os.path.join(case_dir, hydra_run_dir)
+
+    os.makedirs(local_train_dir, exist_ok=True)
+
+    # If link_path exists as a real directory (not symlink), move contents to local
+    if os.path.isdir(link_path) and not os.path.islink(link_path):
+        print(f"[run_case] Moving existing {link_path} → {local_train_dir}")
+        for item in os.listdir(link_path):
+            src = os.path.join(link_path, item)
+            dst = os.path.join(local_train_dir, item)
+            if os.path.exists(dst):
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                else:
+                    os.remove(dst)
+            shutil.move(src, dst)
+        os.rmdir(link_path)
+
+    # Remove stale symlink or empty dir
+    if os.path.islink(link_path):
+        os.remove(link_path)
+    elif os.path.exists(link_path):
+        shutil.rmtree(link_path)
+
+    # Ensure parent exists
+    os.makedirs(os.path.dirname(link_path), exist_ok=True)
+
+    os.symlink(local_train_dir, link_path)
+    print(f"[run_case] Symlink: {link_path} → {local_train_dir}")
+    return local_train_dir
+
+
+def _teardown_local_symlink(
+    case_dir: str, hydra_run_dir: str, local_train_dir: str | None
+) -> None:
+    """Replace symlink with a real copy of the data from local disk."""
+    if local_train_dir is None:
+        return
+
+    link_path = os.path.join(case_dir, hydra_run_dir)
+
+    if os.path.islink(link_path):
+        os.remove(link_path)
+        print(f"[run_case] Removed symlink: {link_path}")
+
+    if os.path.isdir(local_train_dir):
+        shutil.copytree(local_train_dir, link_path)
+        print(f"[run_case] Copied back: {local_train_dir} → {link_path}")
+    else:
+        print(f"[run_case] WARNING: local_train_dir not found: {local_train_dir}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5 & 6. Run heat_sink via subprocess (most reliable for Hydra config resolution)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def run_heat_sink(case_dir: str, max_steps: int, out_dir: str, local_disk: str = "") -> None:
     """Run heat_sink.py as a subprocess from within case_dir.
 
     Using subprocess instead of importlib ensures Hydra resolves config_path="conf"
@@ -147,7 +219,6 @@ def run_heat_sink(case_dir: str, max_steps: int, out_dir: str) -> None:
     freq = max(100, max_steps // 20)
     # hydra.run.dir must be a subpath of cwd (case_dir) due to physicsnemo
     # add_hydra_run_path() using Path.relative_to(). Use a relative path.
-    # Outputs will appear under case_dir/outputs/<timestamp>/ and we symlink later.
     hydra_run_dir = "outputs/run"
 
     overrides = [
@@ -158,16 +229,22 @@ def run_heat_sink(case_dir: str, max_steps: int, out_dir: str) -> None:
         f"hydra.run.dir={hydra_run_dir}",
     ]
 
+    # Setup local-disk symlink if requested
+    local_train_dir = _setup_local_symlink(case_dir, hydra_run_dir, local_disk, "baseline")
+
     cmd = [sys.executable, heat_sink_path] + overrides
     print(f"[run_case] Running: {' '.join(cmd)}")
     print(f"[run_case] cwd: {case_dir}")
 
-    result = subprocess.run(cmd, cwd=case_dir)
+    try:
+        result = subprocess.run(cmd, cwd=case_dir)
+    finally:
+        # Teardown: replace symlink with real copy
+        _teardown_local_symlink(case_dir, hydra_run_dir, local_train_dir)
 
     # Copy hydra outputs from case_dir into out_dir for archival
     src = os.path.join(case_dir, hydra_run_dir)
     if os.path.isdir(src):
-        import shutil
         dst = os.path.join(out_dir, "hydra_outputs")
         if os.path.exists(dst):
             shutil.rmtree(dst)
@@ -178,7 +255,7 @@ def run_heat_sink(case_dir: str, max_steps: int, out_dir: str) -> None:
         raise RuntimeError(f"heat_sink.py exited with code {result.returncode}")
 
 
-def run_heat_sink_param(case_dir: str, max_steps: int, out_dir: str) -> None:
+def run_heat_sink_param(case_dir: str, max_steps: int, out_dir: str, local_disk: str = "") -> None:
     """Run heat_sink_param.py as a subprocess from within case_dir.
 
     Using subprocess instead of importlib ensures Hydra resolves config_path="conf"
@@ -201,16 +278,22 @@ def run_heat_sink_param(case_dir: str, max_steps: int, out_dir: str) -> None:
         f"hydra.run.dir={hydra_run_dir}",
     ]
 
+    # Setup local-disk symlink if requested
+    local_train_dir = _setup_local_symlink(case_dir, hydra_run_dir, local_disk, "param")
+
     cmd = [sys.executable, heat_sink_path] + overrides
     print(f"[run_case] Running: {' '.join(cmd)}")
     print(f"[run_case] cwd: {case_dir}")
 
-    result = subprocess.run(cmd, cwd=case_dir)
+    try:
+        result = subprocess.run(cmd, cwd=case_dir)
+    finally:
+        # Teardown: replace symlink with real copy
+        _teardown_local_symlink(case_dir, hydra_run_dir, local_train_dir)
 
     # Copy hydra outputs from case_dir into out_dir for archival
     src = os.path.join(case_dir, hydra_run_dir)
     if os.path.isdir(src):
-        import shutil
         dst = os.path.join(out_dir, "hydra_outputs")
         if os.path.exists(dst):
             shutil.rmtree(dst)
@@ -637,11 +720,17 @@ def main() -> None:
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
 
+    local_disk = args.local_disk.strip()
+
     print(f"[run_case] Output directory: {out_dir}")
     print(f"[run_case] mode={args.mode}, max_steps={args.max_steps}, seed={args.seed}")
+    if local_disk:
+        print(f"[run_case] local_disk={local_disk}")
 
     # Collect metadata
     meta = collect_metadata(args, start_time)
+    if local_disk:
+        meta["params"]["local_disk"] = local_disk
     meta_path = os.path.join(out_dir, "metadata.json")
     with open(meta_path, "w") as f:
         json.dump(meta, f, indent=2)
@@ -652,11 +741,11 @@ def main() -> None:
     try:
         if args.mode == "param":
             print(f"[run_case] Starting heat_sink_param training...")
-            run_heat_sink_param(args.case_dir, args.max_steps, out_dir)
+            run_heat_sink_param(args.case_dir, args.max_steps, out_dir, local_disk)
             print(f"[run_case] heat_sink_param training complete.")
         else:
             print(f"[run_case] Starting heat_sink training...")
-            run_heat_sink(args.case_dir, args.max_steps, out_dir)
+            run_heat_sink(args.case_dir, args.max_steps, out_dir, local_disk)
             print(f"[run_case] heat_sink training complete.")
     except Exception as e:
         run_error = str(e)

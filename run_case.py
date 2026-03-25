@@ -135,69 +135,109 @@ def collect_metadata(args: argparse.Namespace, start_time: float) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. Local-disk symlink helpers
 # ─────────────────────────────────────────────────────────────────────────────
+# NOTE: We symlink *subdirectories* inside the hydra run dir (not the run dir
+# itself) to avoid breaking physicsnemo's add_hydra_run_path() which requires
+# os.getcwd() to be a real subpath of the original case_dir.  Symlinking the
+# run dir causes os.getcwd() to resolve to the target on local_disk, which
+# makes Path.relative_to(org_dir) fail.
+
+# Heavy I/O subdirectories created by physicsnemo during training:
+_SYMLINK_SUBDIRS = [
+    "network_checkpoints",
+    "monitors",
+    "inferencers",
+    "validators",
+]
+
 
 def _setup_local_symlink(
     case_dir: str, hydra_run_dir: str, local_disk: str, mode_tag: str
 ) -> str | None:
-    """Create symlink from case_dir/outputs/run → local_disk/nemo_train/<tag>/run.
+    """Symlink heavy subdirs inside case_dir/hydra_run_dir → local_disk.
 
-    Returns the local_train_dir path if symlink was created, None otherwise.
+    The run dir itself stays as a real directory so that Hydra's chdir keeps
+    os.getcwd() inside case_dir.
+
+    Returns the local_train_dir base path if symlinks were created, None otherwise.
     """
     if not local_disk:
         return None
 
     run_name = os.path.basename(hydra_run_dir)  # "run" or "run_param"
     local_train_dir = os.path.join(local_disk, "nemo_train", mode_tag, run_name)
-    link_path = os.path.join(case_dir, hydra_run_dir)
+    run_path = os.path.join(case_dir, hydra_run_dir)
 
-    os.makedirs(local_train_dir, exist_ok=True)
+    # If run_path is currently a symlink (from old strategy), convert it back
+    if os.path.islink(run_path):
+        old_target = os.path.realpath(run_path)
+        os.remove(run_path)
+        if os.path.isdir(old_target):
+            shutil.copytree(old_target, run_path)
+            print(f"[run_case] Converted old symlink back to real dir: {run_path}")
+        else:
+            os.makedirs(run_path, exist_ok=True)
 
-    # If link_path exists as a real directory (not symlink), move contents to local
-    if os.path.isdir(link_path) and not os.path.islink(link_path):
-        print(f"[run_case] Moving existing {link_path} → {local_train_dir}")
-        for item in os.listdir(link_path):
-            src = os.path.join(link_path, item)
-            dst = os.path.join(local_train_dir, item)
-            if os.path.exists(dst):
-                if os.path.isdir(dst):
-                    shutil.rmtree(dst)
-                else:
-                    os.remove(dst)
-            shutil.move(src, dst)
-        os.rmdir(link_path)
+    # Ensure the run dir exists as a real directory
+    os.makedirs(run_path, exist_ok=True)
 
-    # Remove stale symlink or empty dir
-    if os.path.islink(link_path):
-        os.remove(link_path)
-    elif os.path.exists(link_path):
-        shutil.rmtree(link_path)
+    for subdir in _SYMLINK_SUBDIRS:
+        local_sub = os.path.join(local_train_dir, subdir)
+        link_sub = os.path.join(run_path, subdir)
 
-    # Ensure parent exists
-    os.makedirs(os.path.dirname(link_path), exist_ok=True)
+        os.makedirs(local_sub, exist_ok=True)
 
-    os.symlink(local_train_dir, link_path)
-    print(f"[run_case] Symlink: {link_path} → {local_train_dir}")
+        # Move existing real subdir contents to local
+        if os.path.isdir(link_sub) and not os.path.islink(link_sub):
+            print(f"[run_case] Moving existing {link_sub} → {local_sub}")
+            for item in os.listdir(link_sub):
+                src = os.path.join(link_sub, item)
+                dst = os.path.join(local_sub, item)
+                if os.path.exists(dst):
+                    if os.path.isdir(dst):
+                        shutil.rmtree(dst)
+                    else:
+                        os.remove(dst)
+                shutil.move(src, dst)
+            os.rmdir(link_sub)
+
+        # Remove stale symlink
+        if os.path.islink(link_sub):
+            os.remove(link_sub)
+        elif os.path.exists(link_sub):
+            shutil.rmtree(link_sub)
+
+        os.symlink(local_sub, link_sub)
+        print(f"[run_case] Symlink: {link_sub} → {local_sub}")
+
     return local_train_dir
 
 
 def _teardown_local_symlink(
     case_dir: str, hydra_run_dir: str, local_train_dir: str | None
 ) -> None:
-    """Replace symlink with a real copy of the data from local disk."""
+    """Replace subdir symlinks with real copies of the data from local disk."""
     if local_train_dir is None:
         return
 
-    link_path = os.path.join(case_dir, hydra_run_dir)
+    run_path = os.path.join(case_dir, hydra_run_dir)
 
-    if os.path.islink(link_path):
-        os.remove(link_path)
-        print(f"[run_case] Removed symlink: {link_path}")
+    for subdir in _SYMLINK_SUBDIRS:
+        link_sub = os.path.join(run_path, subdir)
+        local_sub = os.path.join(local_train_dir, subdir)
 
-    if os.path.isdir(local_train_dir):
-        shutil.copytree(local_train_dir, link_path)
-        print(f"[run_case] Copied back: {local_train_dir} → {link_path}")
-    else:
-        print(f"[run_case] WARNING: local_train_dir not found: {local_train_dir}")
+        if os.path.islink(link_sub):
+            os.remove(link_sub)
+            if os.path.isdir(local_sub):
+                shutil.copytree(local_sub, link_sub)
+                print(f"[run_case] Copied back: {local_sub} → {link_sub}")
+            else:
+                os.makedirs(link_sub, exist_ok=True)
+                print(f"[run_case] WARNING: local subdir not found, created empty: {link_sub}")
+        elif not os.path.exists(link_sub) and os.path.isdir(local_sub):
+            shutil.copytree(local_sub, link_sub)
+            print(f"[run_case] Copied back (no link): {local_sub} → {link_sub}")
+
+    print(f"[run_case] Teardown complete for {run_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

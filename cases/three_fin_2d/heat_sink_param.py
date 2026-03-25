@@ -228,7 +228,7 @@ def run(cfg: PhysicsNeMoConfig) -> None:
         outvar={"normal_dot_vel": (2 / 3) * inlet_vel_sym},
         batch_size=cfg.batch_size.num_integral_continuity,
         integral_batch_size=cfg.batch_size.integral_continuity,
-        lambda_weighting={"normal_dot_vel": 0.1},
+        lambda_weighting={"normal_dot_vel": 1.0},
         criteria=integral_criteria,
         parameterization=Parameterization({
             x_pos: channel_length,
@@ -236,6 +236,18 @@ def run(cfg: PhysicsNeMoConfig) -> None:
         }),
     )
     domain.add_constraint(integral_continuity, "integral_continuity")
+
+    representative_velocities = (1.0, 1.5, 2.5)
+    boundary_validator_points = 256
+    interior_monitor_points = 200
+    boundary_monitor_points = 200
+    line_monitor_points = 256
+
+    def velocity_tag(value: float) -> str:
+        return f"v{value:.1f}".replace(".", "p")
+
+    def weighted_area_mean(var, key):
+        return torch.sum(var["area"] * var[key]) / torch.sum(var["area"])
 
     # ── Validators (optional, requires NGC data) ──────────────────────────────
     file_path = "openfoam/heat_sink_zeroEq_Pr5_mesh20.csv"
@@ -272,7 +284,7 @@ def run(cfg: PhysicsNeMoConfig) -> None:
             invar=openfoam_invar_numpy,
             true_outvar=openfoam_outvar_numpy,
         )
-        domain.add_validator(openfoam_validator)
+        domain.add_validator(openfoam_validator, "openfoam_1p5")
     else:
         warnings.warn(
             f"Directory {file_path} does not exist. Will skip adding validators. "
@@ -281,44 +293,131 @@ def run(cfg: PhysicsNeMoConfig) -> None:
             "physicsnemo_sym_examples_supplemental_materials"
         )
 
-    # ── Monitors — fixed at inlet_vel=1.5 for consistent tracking ────────────
-    fixed_params = Parameterization({inlet_vel_sym: 1.5})
+    # Additional analytic validators at representative velocities make boundary
+    # regressions visible even when OpenFOAM data only exists at inlet_vel=1.5.
+    for monitor_vel in representative_velocities:
+        vel_tag = velocity_tag(monitor_vel)
+        fixed_params = Parameterization({inlet_vel_sym: monitor_vel})
 
-    global_monitor = PointwiseMonitor(
-        geo.sample_interior(100, parameterization=fixed_params),
-        output_names=["continuity", "momentum_x", "momentum_y"],
-        metrics={
-            "mass_imbalance": lambda var: torch.sum(
-                var["area"] * torch.abs(var["continuity"])
+        inlet_samples = inlet.sample_boundary(
+            boundary_validator_points, parameterization=fixed_params
+        )
+        inlet_y = inlet_samples["y"]
+        inlet_invar_numpy = {
+            "x": inlet_samples["x"],
+            "y": inlet_samples["y"],
+            "inlet_vel": np.full_like(inlet_samples["x"], monitor_vel),
+        }
+        inlet_outvar_numpy = {
+            "u": monitor_vel * (1.0 - 4.0 * inlet_y**2),
+            "v": np.zeros_like(inlet_y),
+            "c": np.zeros_like(inlet_y),
+        }
+        inlet_validator = PointwiseValidator(
+            nodes=nodes,
+            invar=inlet_invar_numpy,
+            true_outvar=inlet_outvar_numpy,
+        )
+        domain.add_validator(inlet_validator, f"inlet_profile_{vel_tag}")
+
+        outlet_samples = outlet.sample_boundary(
+            boundary_validator_points, parameterization=fixed_params
+        )
+        outlet_invar_numpy = {
+            "x": outlet_samples["x"],
+            "y": outlet_samples["y"],
+            "inlet_vel": np.full_like(outlet_samples["x"], monitor_vel),
+        }
+        outlet_outvar_numpy = {
+            "p": np.zeros_like(outlet_samples["x"]),
+        }
+        outlet_validator = PointwiseValidator(
+            nodes=nodes,
+            invar=outlet_invar_numpy,
+            true_outvar=outlet_outvar_numpy,
+        )
+        domain.add_validator(outlet_validator, f"outlet_pressure_{vel_tag}")
+
+        target_flow = (2.0 / 3.0) * monitor_vel
+
+        global_monitor = PointwiseMonitor(
+            geo.sample_interior(interior_monitor_points, parameterization=fixed_params),
+            output_names=["u", "v", "c", "continuity", "momentum_x", "momentum_y"],
+            metrics={
+                f"mass_imbalance_{vel_tag}": lambda var: torch.sum(
+                    var["area"] * torch.abs(var["continuity"])
+                ),
+                f"momentum_imbalance_{vel_tag}": lambda var: torch.sum(
+                    var["area"]
+                    * (torch.abs(var["momentum_x"]) + torch.abs(var["momentum_y"]))
+                ),
+                f"speed_max_{vel_tag}": lambda var: torch.max(
+                    torch.sqrt(var["u"] ** 2 + var["v"] ** 2)
+                ),
+                f"c_mean_{vel_tag}": lambda var: weighted_area_mean(var, "c"),
+            },
+            nodes=nodes,
+            requires_grad=True,
+        )
+        domain.add_monitor(global_monitor, f"global_{vel_tag}")
+
+        heat_sink_monitor = PointwiseMonitor(
+            heat_sink.sample_boundary(
+                boundary_monitor_points, parameterization=fixed_params
             ),
-            "momentum_imbalance": lambda var: torch.sum(
-                var["area"]
-                * (torch.abs(var["momentum_x"]) + torch.abs(var["momentum_y"]))
-            ),
-        },
-        nodes=nodes,
-        requires_grad=True,
-    )
-    domain.add_monitor(global_monitor)
+            output_names=["p", "c"],
+            metrics={
+                f"force_x_{vel_tag}": lambda var: torch.sum(
+                    var["normal_x"] * var["area"] * var["p"]
+                ),
+                f"force_y_{vel_tag}": lambda var: torch.sum(
+                    var["normal_y"] * var["area"] * var["p"]
+                ),
+                f"peakT_{vel_tag}": lambda var: torch.max(var["c"]),
+            },
+            nodes=nodes,
+        )
+        domain.add_monitor(heat_sink_monitor, f"heat_sink_{vel_tag}")
 
-    force = PointwiseMonitor(
-        heat_sink.sample_boundary(100, parameterization=fixed_params),
-        output_names=["p"],
-        metrics={
-            "force_x": lambda var: torch.sum(var["normal_x"] * var["area"] * var["p"]),
-            "force_y": lambda var: torch.sum(var["normal_y"] * var["area"] * var["p"]),
-        },
-        nodes=nodes,
-    )
-    domain.add_monitor(force)
+        inlet_monitor = PointwiseMonitor(
+            inlet.sample_boundary(line_monitor_points, parameterization=fixed_params),
+            output_names=["p", "c", "normal_dot_vel"],
+            metrics={
+                f"inlet_pressure_mean_{vel_tag}": lambda var: weighted_area_mean(
+                    var, "p"
+                ),
+                f"inlet_c_mean_{vel_tag}": lambda var: weighted_area_mean(var, "c"),
+                f"inlet_flow_{vel_tag}": lambda var: -torch.sum(
+                    var["area"] * var["normal_dot_vel"]
+                ),
+                f"inlet_flow_error_{vel_tag}": lambda var, target=target_flow: -torch.sum(
+                    var["area"] * var["normal_dot_vel"]
+                )
+                - target,
+            },
+            nodes=nodes,
+        )
+        domain.add_monitor(inlet_monitor, f"inlet_{vel_tag}")
 
-    peakT = PointwiseMonitor(
-        heat_sink.sample_boundary(100, parameterization=fixed_params),
-        output_names=["c"],
-        metrics={"peakT": lambda var: torch.max(var["c"])},
-        nodes=nodes,
-    )
-    domain.add_monitor(peakT)
+        outlet_monitor = PointwiseMonitor(
+            outlet.sample_boundary(line_monitor_points, parameterization=fixed_params),
+            output_names=["p", "c", "normal_dot_vel"],
+            metrics={
+                f"outlet_pressure_mean_{vel_tag}": lambda var: weighted_area_mean(
+                    var, "p"
+                ),
+                f"outlet_c_mean_{vel_tag}": lambda var: weighted_area_mean(var, "c"),
+                f"outlet_flow_{vel_tag}": lambda var: torch.sum(
+                    var["area"] * var["normal_dot_vel"]
+                ),
+                f"outlet_flow_error_{vel_tag}": lambda var, target=target_flow: torch.sum(
+                    var["area"] * var["normal_dot_vel"]
+                )
+                - target,
+            },
+            nodes=nodes,
+        )
+        domain.add_monitor(outlet_monitor, f"outlet_{vel_tag}")
 
     # ── Solve ─────────────────────────────────────────────────────────────────
     slv = Solver(cfg, domain)

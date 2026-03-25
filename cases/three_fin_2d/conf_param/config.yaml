@@ -36,7 +36,7 @@ batch_size:
   interior_flow: 9600
   interior_heat: 9600
   integral_continuity: 256
-  num_integral_continuity: 4
+  num_integral_continuity: 8
 
 custom:
   parameterized: true

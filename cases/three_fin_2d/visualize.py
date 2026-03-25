@@ -66,7 +66,6 @@ HEAT_SINK_TEMP = 350.0
 BASE_TEMP = 293.498
 C_WALL = (HEAT_SINK_TEMP - BASE_TEMP) / 273.15
 DEFAULT_CSV_PATH = CASE_DIR / "openfoam" / "heat_sink_zeroEq_Pr5_mesh20.csv"
-DEFAULT_OUT_DIR = REPO_ROOT / "outputs" / "param_trend_check"
 
 
 def parse_args() -> argparse.Namespace:
@@ -85,8 +84,8 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--out-dir",
-        default=str(DEFAULT_OUT_DIR),
-        help=f"Output dir for plots/report (default: {DEFAULT_OUT_DIR})",
+        default=None,
+        help="Output dir for plots/report (default: <run-dir>/trend_check)",
     )
     p.add_argument(
         "--velocities",
@@ -561,7 +560,7 @@ def main() -> None:
     args = parse_args()
     run_dir = resolve_repo_path(args.run_dir)
     csv_path = resolve_repo_path(args.csv_path)
-    out_dir = resolve_repo_path(args.out_dir)
+    out_dir = resolve_repo_path(args.out_dir) if args.out_dir else run_dir / "trend_check"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     artifact_dir = find_artifact_dir(str(run_dir))

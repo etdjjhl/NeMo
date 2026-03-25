@@ -27,16 +27,15 @@ training:
   rec_constraint_freq: 2000
   max_steps: 800000
 
-# Batch sizes tuned for RTX A4000 16GB (~25k samples/step, ~14-15GB peak)
 batch_size:
-  inlet: 144
-  outlet: 144
-  hs_wall: 1024
-  channel_wall: 5000
-  interior_flow: 5400
-  interior_heat: 5400
-  ic_flow: 3600
-  ic_heat: 3600
+  inlet: 96
+  outlet: 96
+  hs_wall: 750
+  channel_wall: 3750
+  interior_flow: 3600
+  interior_heat: 3600
+  ic_flow: 2400
+  ic_heat: 2400
   integral_continuity: 128
   num_integral_continuity: 4
 

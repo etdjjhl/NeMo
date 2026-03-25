@@ -5,6 +5,8 @@
 #   MAX_STEPS=500000 bash run_case.sh             # baseline full run
 #   MODE=param bash run_case.sh                   # parameterized 10k steps
 #   MODE=param MAX_STEPS=300000 bash run_case.sh  # recommended full param run
+#   MODE=transient bash run_case.sh               # transient 10k steps
+#   MODE=transient MAX_STEPS=800000 bash run_case.sh  # recommended full transient run
 #   LOCAL_DISK=/home/featurize/data MAX_STEPS=50000 bash run_case.sh  # local disk acceleration
 set -euo pipefail
 
@@ -13,7 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="${ENV_DIR:-/home/featurize/work/env_conda/nemo}"
 PYTHON="${ENV_DIR}/bin/python"
 MAX_STEPS="${MAX_STEPS:-10000}"
-MODE="${MODE:-baseline}"   # baseline | param
+MODE="${MODE:-baseline}"   # baseline | param | transient
 LOCAL_DISK="${LOCAL_DISK:-}"   # empty=default behavior; set to fast local path (e.g. /home/featurize/data)
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 OUT_DIR="${SCRIPT_DIR}/outputs/${MODE}/${TIMESTAMP}"

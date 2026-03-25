@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2024 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Transient (time-parameterized) PINN configuration for three-fin 2D heat sink.
+# The model learns the full temporal evolution from quiescent IC to steady state.
+
+defaults :
+  - physicsnemo_default
+  - arch:
+      - fully_connected
+  - optimizer : adam
+  - scheduler : tf_exponential_lr
+  - loss : sum
+  - _self_
+
+jit: false
+
+scheduler:
+  decay_rate: 0.95
+  decay_steps: 5000
+
+training:
+  rec_validation_freq: 1000
+  rec_inference_freq: 1000
+  rec_monitor_freq: 1000
+  rec_constraint_freq: 2000
+  max_steps: 800000
+
+batch_size:
+  inlet: 96
+  outlet: 96
+  hs_wall: 750
+  channel_wall: 3750
+  interior_flow: 3600
+  interior_heat: 3600
+  ic_flow: 2400
+  ic_heat: 2400
+  integral_continuity: 128
+  num_integral_continuity: 4
+
+custom:
+  transient: true

@@ -36,7 +36,10 @@ except ImportError:
 
 T_MAX = 10.0
 SNAPSHOT_TIMES = [0.0, 2.5, 5.0, T_MAX]
-PROBE_POINTS = [(0.0, 0.0), (-2.0, 0.0), (2.0, 0.0), (0.0, 0.4)]
+# Probe points must be in the fluid domain (outside heat sink fins).
+# Fins cover x in [-1, 0], y in [-0.30,-0.20], [-0.05,+0.05], [+0.20,+0.30].
+# (0.5, 0.0) is downstream of the fins; (-0.5, 0.12) is in the gap between fins.
+PROBE_POINTS = [(0.5, 0.0), (-2.0, 0.0), (2.0, 0.0), (-0.5, 0.12)]
 FIELDS = ["u", "v", "p", "c"]
 
 CHANNEL_LENGTH = (-2.5, 2.5)
@@ -111,110 +114,103 @@ def make_domain_grid(n_grid, rects):
 # Model loading
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _find_artifact_dir(checkpoint_dir):
+    """Locate the directory containing .hydra/config.yaml and network checkpoints."""
+    root = Path(checkpoint_dir).resolve()
+    # Check common locations
+    candidates = [
+        root,
+        root / "hydra_outputs",
+        root / "outputs" / "run_transient",
+    ]
+    for path in candidates:
+        hydra_cfg = path / ".hydra" / "config.yaml"
+        has_ckpts = list(path.glob("flow_network*.pth")) or \
+                    list((path / "network_checkpoints").glob("flow_network*.pth")) if (path / "network_checkpoints").is_dir() else []
+        if hydra_cfg.exists():
+            return path
+    # Fallback: search recursively for .hydra/config.yaml
+    for hydra_cfg in root.rglob(".hydra/config.yaml"):
+        return hydra_cfg.parent.parent
+    raise FileNotFoundError(
+        f"Could not find .hydra/config.yaml under {root}. "
+        "Point --checkpoint-dir to the Hydra run directory."
+    )
+
+
 def load_models(checkpoint_dir):
-    """Load flow_net and heat_net from checkpoint directory."""
-    ckpt_dir = os.path.join(checkpoint_dir, "network_checkpoints")
-    if not os.path.isdir(ckpt_dir):
-        # Try one level up
-        alt = os.path.join(checkpoint_dir, "outputs", "run_transient", "network_checkpoints")
-        if os.path.isdir(alt):
-            ckpt_dir = alt
-        else:
-            raise FileNotFoundError(
-                f"network_checkpoints not found in {checkpoint_dir} or {alt}"
-            )
+    """Load flow_net and heat_net by reading the training Hydra config.
 
-    flow_path = os.path.join(ckpt_dir, "flow_network.0.pth")
-    heat_path = os.path.join(ckpt_dir, "heat_network.0.pth")
+    Reconstructs the exact network architecture from .hydra/config.yaml
+    (same approach as compare_openfoam_csv.load_models), then loads weights.
+    """
+    from omegaconf import OmegaConf
+    from physicsnemo.sym.hydra import instantiate_arch
+    from physicsnemo.sym.key import Key
 
-    if not os.path.isfile(flow_path):
-        raise FileNotFoundError(f"Flow network checkpoint not found: {flow_path}")
-    if not os.path.isfile(heat_path):
-        raise FileNotFoundError(f"Heat network checkpoint not found: {heat_path}")
+    artifact_dir = _find_artifact_dir(checkpoint_dir)
+    cfg_path = artifact_dir / ".hydra" / "config.yaml"
+    cfg = OmegaConf.load(cfg_path)
 
-    # Load state dicts to infer architecture
-    flow_state = torch.load(flow_path, map_location="cpu", weights_only=False)
-    heat_state = torch.load(heat_path, map_location="cpu", weights_only=False)
+    input_keys = [Key("x"), Key("y"), Key("t")]
 
-    # Try to use physicsnemo to reconstruct the architecture
-    try:
-        from physicsnemo.sym.models.fully_connected import FullyConnectedArch
-        from physicsnemo.sym.key import Key
+    flow_net = instantiate_arch(
+        input_keys=input_keys,
+        output_keys=[Key("u"), Key("v"), Key("p")],
+        cfg=cfg.arch.fully_connected,
+    )
+    heat_net = instantiate_arch(
+        input_keys=input_keys,
+        output_keys=[Key("c")],
+        cfg=cfg.arch.fully_connected,
+    )
 
-        flow_net = FullyConnectedArch(
-            input_keys=[Key("x"), Key("y"), Key("t")],
-            output_keys=[Key("u"), Key("v"), Key("p")],
-        )
-        heat_net = FullyConnectedArch(
-            input_keys=[Key("x"), Key("y"), Key("t")],
-            output_keys=[Key("c")],
-        )
-        flow_net.load_state_dict(flow_state)
-        heat_net.load_state_dict(heat_state)
-    except Exception as e:
-        warnings.warn(f"Could not load via FullyConnectedArch: {e}. Trying raw state dict approach.")
-        # Fallback: build matching linear layers from state dict
-        flow_net = _build_net_from_state(flow_state, 3, 3)
-        heat_net = _build_net_from_state(heat_state, 3, 1)
+    # Find checkpoint files (in artifact_dir or artifact_dir/network_checkpoints)
+    ckpt_dir = artifact_dir
+    if not list(ckpt_dir.glob("flow_network*.pth")):
+        ckpt_dir = artifact_dir / "network_checkpoints"
+    flow_ckpts = sorted(ckpt_dir.glob("flow_network*.pth"))
+    heat_ckpts = sorted(ckpt_dir.glob("heat_network*.pth"))
+    if not flow_ckpts or not heat_ckpts:
+        raise FileNotFoundError(f"Checkpoint files not found in {artifact_dir} or {ckpt_dir}")
 
-    flow_net.eval()
-    heat_net.eval()
-    return flow_net, heat_net
-
-
-def _build_net_from_state(state_dict, n_in, n_out):
-    """Build a simple sequential model matching the state dict layer shapes."""
-    layers = []
-    keys = sorted([k for k in state_dict if "weight" in k])
-    for i, wkey in enumerate(keys):
-        bkey = wkey.replace("weight", "bias")
-        w = state_dict[wkey]
-        b = state_dict.get(bkey)
-        linear = torch.nn.Linear(w.shape[1], w.shape[0])
-        linear.weight.data = w
-        if b is not None:
-            linear.bias.data = b
-        layers.append(linear)
-        if i < len(keys) - 1:
-            layers.append(torch.nn.SiLU())
-    return torch.nn.Sequential(*layers)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    flow_net.load_state_dict(torch.load(flow_ckpts[-1], map_location=device, weights_only=False))
+    heat_net.load_state_dict(torch.load(heat_ckpts[-1], map_location=device, weights_only=False))
+    flow_net.to(device).eval()
+    heat_net.to(device).eval()
+    return flow_net, heat_net, device
 
 
 @torch.no_grad()
-def predict(flow_net, heat_net, x, y, t_val):
+def predict(flow_net, heat_net, x, y, t_val, device=None):
     """Run inference at given (x, y, t) points. Returns dict of numpy arrays."""
+    if device is None:
+        device = torch.device("cpu")
     n = len(x)
-    inp = torch.tensor(
-        np.column_stack([x, y, np.full(n, t_val)]),
-        dtype=torch.float32,
-    )
+    x_t = torch.as_tensor(x, dtype=torch.float32, device=device).reshape(-1, 1)
+    y_t = torch.as_tensor(y, dtype=torch.float32, device=device).reshape(-1, 1)
+    t_t = torch.full_like(x_t, t_val)
 
-    # Handle both physicsnemo arch and raw sequential
-    try:
-        flow_out = flow_net({"x": inp[:, 0:1], "y": inp[:, 1:2], "t": inp[:, 2:3]})
-        heat_out = heat_net({"x": inp[:, 0:1], "y": inp[:, 1:2], "t": inp[:, 2:3]})
-        u = flow_out["u"].numpy().ravel()
-        v = flow_out["v"].numpy().ravel()
-        p = flow_out["p"].numpy().ravel()
-        c = heat_out["c"].numpy().ravel()
-    except (TypeError, KeyError):
-        flow_out = flow_net(inp)
-        heat_out = heat_net(inp)
-        u = flow_out[:, 0].numpy()
-        v = flow_out[:, 1].numpy()
-        p = flow_out[:, 2].numpy()
-        c = heat_out[:, 0].numpy()
+    model_in = {"x": x_t, "y": y_t, "t": t_t}
+    flow_out = flow_net(model_in)
+    heat_out = heat_net(model_in)
 
-    return {"u": u, "v": v, "p": p, "c": c}
+    return {
+        "u": flow_out["u"].cpu().numpy().ravel(),
+        "v": flow_out["v"].cpu().numpy().ravel(),
+        "p": flow_out["p"].cpu().numpy().ravel(),
+        "c": heat_out["c"].cpu().numpy().ravel(),
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Plotting
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_fields_at_time(flow_net, heat_net, t_val, x, y, xx, yy, mask, rects, out_dir):
+def plot_fields_at_time(flow_net, heat_net, t_val, x, y, xx, yy, mask, rects, out_dir, device=None):
     """Plot u, v, p, c fields at a given time snapshot."""
-    preds = predict(flow_net, heat_net, x, y, t_val)
+    preds = predict(flow_net, heat_net, x, y, t_val, device)
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 8))
     fig.suptitle(f"Fields at t = {t_val:.1f} s", fontsize=14)
@@ -241,7 +237,7 @@ def plot_fields_at_time(flow_net, heat_net, t_val, x, y, xx, yy, mask, rects, ou
     return fpath
 
 
-def plot_probe_evolution(flow_net, heat_net, n_time, out_dir):
+def plot_probe_evolution(flow_net, heat_net, n_time, out_dir, device=None):
     """Plot time evolution of all fields at probe points."""
     t_arr = np.linspace(0, T_MAX, n_time)
 
@@ -253,7 +249,7 @@ def plot_probe_evolution(flow_net, heat_net, n_time, out_dir):
             vals = []
             for t_val in t_arr:
                 pred = predict(flow_net, heat_net,
-                               np.array([px]), np.array([py]), t_val)
+                               np.array([px]), np.array([py]), t_val, device)
                 vals.append(pred[field][0])
             ax.plot(t_arr, vals, label=f"({px},{py})")
         ax.set_ylabel(field)
@@ -272,7 +268,7 @@ def plot_probe_evolution(flow_net, heat_net, n_time, out_dir):
 # OpenFOAM comparison
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compare_openfoam(flow_net, heat_net, csv_path, out_dir):
+def compare_openfoam(flow_net, heat_net, csv_path, out_dir, device=None):
     """Compare t=t_max predictions with OpenFOAM steady-state reference."""
     try:
         from physicsnemo.sym.utils.io import csv_to_dict
@@ -290,7 +286,7 @@ def compare_openfoam(flow_net, heat_net, csv_path, out_dir):
     data["c"] = (data["c"] - base_temp) / 273.15
 
     x, y = data["x"].ravel(), data["y"].ravel()
-    preds = predict(flow_net, heat_net, x, y, T_MAX)
+    preds = predict(flow_net, heat_net, x, y, T_MAX, device)
 
     errors = {}
     for field in FIELDS:
@@ -326,14 +322,18 @@ def compare_openfoam(flow_net, heat_net, csv_path, out_dir):
 # Physical trend checks
 # ─────────────────────────────────────────────────────────────────────────────
 
-def physical_trend_checks(flow_net, heat_net):
-    """Check that physical trends are correct."""
+def physical_trend_checks(flow_net, heat_net, device=None):
+    """Check that physical trends are correct.
+
+    All check points must be in the fluid domain (outside heat sink fins).
+    Fins cover x in [-1, 0], y bands [-0.30,-0.20], [-0.05,+0.05], [+0.20,+0.30].
+    """
     checks = []
 
-    # At t=0, speed should be near zero everywhere
-    x_pts = np.array([0.0, -2.0, 2.0])
-    y_pts = np.array([0.0, 0.0, 0.0])
-    pred_t0 = predict(flow_net, heat_net, x_pts, y_pts, 0.0)
+    # Fluid-domain check points: upstream, fin-gap, downstream
+    x_pts = np.array([-2.0, -0.5, 0.5])
+    y_pts = np.array([0.0, 0.12, 0.0])
+    pred_t0 = predict(flow_net, heat_net, x_pts, y_pts, 0.0, device)
     speed_t0 = np.sqrt(pred_t0["u"] ** 2 + pred_t0["v"] ** 2)
     max_speed_t0 = speed_t0.max()
     checks.append({
@@ -352,23 +352,24 @@ def physical_trend_checks(flow_net, heat_net):
         "passed": max_c_t0 < 0.1,
     })
 
-    # At t=t_max, speed should be established (~1.5 at center)
+    # At t=t_max, speed should be established at downstream center (0.5, 0)
     pred_tmax = predict(flow_net, heat_net,
-                        np.array([0.0]), np.array([0.0]), T_MAX)
+                        np.array([0.5]), np.array([0.0]), T_MAX, device)
     speed_tmax = np.sqrt(pred_tmax["u"][0] ** 2 + pred_tmax["v"][0] ** 2)
     checks.append({
-        "name": "Steady: speed at (0,0) at t=t_max > 0.5",
+        "name": "Steady: speed at (0.5,0) at t=t_max > 0.5",
         "value": float(speed_tmax),
         "threshold": 0.5,
         "passed": speed_tmax > 0.5,
     })
 
-    # Speed should increase from t=0 to t=t_max at center
+    # Speed should increase from t=0 to t=t_max at downstream center
+    # Use index 2 which is (0.5, 0.0)
     checks.append({
-        "name": "Trend: speed increases from t=0 to t=t_max at (0,0)",
-        "value": f"{float(speed_t0[0]):.4f} -> {float(speed_tmax):.4f}",
+        "name": "Trend: speed increases from t=0 to t=t_max at (0.5,0)",
+        "value": f"{float(speed_t0[2]):.4f} -> {float(speed_tmax):.4f}",
         "threshold": "monotonic increase",
-        "passed": speed_tmax > speed_t0[0],
+        "passed": speed_tmax > speed_t0[2],
     })
 
     return checks
@@ -455,7 +456,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"[validate] Loading models from {args.checkpoint_dir}...")
-    flow_net, heat_net = load_models(args.checkpoint_dir)
+    flow_net, heat_net, device = load_models(args.checkpoint_dir)
     print("[validate] Models loaded.")
 
     rects = make_heat_sink_rects()
@@ -466,24 +467,24 @@ def main():
     field_plots = []
     for t_val in SNAPSHOT_TIMES:
         print(f"  t = {t_val:.1f}")
-        fp = plot_fields_at_time(flow_net, heat_net, t_val, x, y, xx, yy, mask, rects, out_dir)
+        fp = plot_fields_at_time(flow_net, heat_net, t_val, x, y, xx, yy, mask, rects, out_dir, device)
         field_plots.append(fp)
 
     # Probe evolution
     print("[validate] Generating probe evolution plots...")
-    probe_plot = plot_probe_evolution(flow_net, heat_net, args.n_time, out_dir)
+    probe_plot = plot_probe_evolution(flow_net, heat_net, args.n_time, out_dir, device)
 
     # OpenFOAM comparison
     errors = None
     if args.openfoam_csv and os.path.isfile(args.openfoam_csv):
         print(f"[validate] Comparing with OpenFOAM: {args.openfoam_csv}")
-        errors = compare_openfoam(flow_net, heat_net, args.openfoam_csv, out_dir)
+        errors = compare_openfoam(flow_net, heat_net, args.openfoam_csv, out_dir, device)
     else:
         print("[validate] No OpenFOAM CSV provided; skipping comparison.")
 
     # Physical trend checks
     print("[validate] Running physical trend checks...")
-    checks = physical_trend_checks(flow_net, heat_net)
+    checks = physical_trend_checks(flow_net, heat_net, device)
     for ch in checks:
         status = "PASS" if ch["passed"] else "FAIL"
         print(f"  [{status}] {ch['name']}: {ch['value']}")

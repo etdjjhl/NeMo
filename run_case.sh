@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
 # run_case.sh — Run the PhysicsNeMo Sym three-fin 2D heat-sink PINN demo
 # Usage:
-#   bash run_case.sh                      # default 10k steps
-#   MAX_STEPS=500000 bash run_case.sh     # full run
+#   bash run_case.sh                              # baseline, default 10k steps
+#   MAX_STEPS=500000 bash run_case.sh             # baseline full run
+#   MODE=param bash run_case.sh                   # parameterized 10k steps
+#   MODE=param MAX_STEPS=300000 bash run_case.sh  # recommended full param run
+#   LOCAL_DISK=/home/featurize/data MAX_STEPS=50000 bash run_case.sh  # local disk acceleration
 set -euo pipefail
 
 # ── Configuration ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_DIR="${ENV_DIR:-/home/featurize/work/env_conda/nemo}"
 PYTHON="${ENV_DIR}/bin/python"
+MAX_STEPS="${MAX_STEPS:-10000}"
+MODE="${MODE:-baseline}"   # baseline | param
+LOCAL_DISK="${LOCAL_DISK:-}"   # empty=default behavior; set to fast local path (e.g. /home/featurize/data)
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
-OUT_DIR="${SCRIPT_DIR}/outputs/${TIMESTAMP}"
-LATEST_LINK="${SCRIPT_DIR}/outputs/latest"
+OUT_DIR="${SCRIPT_DIR}/outputs/${MODE}/${TIMESTAMP}"
+LATEST_LINK="${SCRIPT_DIR}/outputs/${MODE}/latest"
 CASE_SOURCE_REPO="https://github.com/NVIDIA/modulus-sym"
 CASE_SUBDIR="examples/three_fin_2d"
 CASES_DIR="${SCRIPT_DIR}/cases"
 CASE_DIR="${CASES_DIR}/three_fin_2d"
-MAX_STEPS="${MAX_STEPS:-10000}"
 
 # ── 1. Pre-flight checks ──────────────────────────────────────────────────────
 echo "=========================================="
@@ -116,22 +121,28 @@ echo "[4/5] GPU monitor running."
 
 # ── 5. Run the demo ───────────────────────────────────────────────────────────
 echo ""
-echo "[5/5] Running heat-sink demo (MAX_STEPS=${MAX_STEPS})..."
+echo "[5/5] Running heat-sink demo (MODE=${MODE}, MAX_STEPS=${MAX_STEPS})..."
 echo "  Python     : $PYTHON"
 echo "  Case dir   : $CASE_DIR"
 echo "  Output dir : $OUT_DIR"
+echo "  Mode       : $MODE"
+if [[ -n "$LOCAL_DISK" ]]; then
+    echo "  Local disk : $LOCAL_DISK"
+fi
 echo ""
 
 "$PYTHON" "${SCRIPT_DIR}/run_case.py" \
     --case-dir  "$CASE_DIR" \
     --out-dir   "$OUT_DIR" \
     --max-steps "$MAX_STEPS" \
-    --seed      42
+    --seed      42 \
+    --mode      "$MODE" \
+    --local-disk "$LOCAL_DISK"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 echo ""
 echo "=========================================="
-echo "  Run complete!"
+echo "  Run complete! (mode=$MODE)"
 echo "  Results: $OUT_DIR"
 echo "  Report : ${OUT_DIR}/baseline_report.md"
 echo "  Charts : ${OUT_DIR}/charts/"

@@ -23,7 +23,7 @@ import warnings
 
 import torch
 import numpy as np
-from sympy import Symbol
+from sympy import Symbol, exp
 
 import physicsnemo.sym
 from physicsnemo.sym.hydra import to_absolute_path, instantiate_arch, PhysicsNeMoConfig
@@ -67,6 +67,12 @@ def run(cfg: PhysicsNeMoConfig) -> None:
     t_max = 10.0
     t_symbol = Symbol("t")
     time_range = {t_symbol: (0.0, t_max)}
+
+    # Smooth ramp function: r(t) = 1 - exp(-t/tau)
+    # r(0) = 0 exactly (compatible with IC), r(3*tau) ≈ 0.95, r(5*tau) ≈ 0.99
+    # tau=1.0 → ~95% at t=3s, ~99.3% at t=5s, effectively steady by t=10s
+    tau = 1.0
+    ramp = 1 - exp(-t_symbol / tau)
 
     # ── Sympy spatial variables ───────────────────────────────────────────────
     _x, y = Symbol("x"), Symbol("y")
@@ -146,14 +152,16 @@ def run(cfg: PhysicsNeMoConfig) -> None:
 
     # ── BCs (applied for all t in [0, t_max]) ─────────────────────────────────
 
-    # inlet — parabolic profile (impulsive start: full velocity from t=0+)
+    # inlet — parabolic profile with smooth ramp-up: u(y,t) = parabola(y) * ramp(t)
+    # At t=0: ramp=0 → u=0, compatible with IC (fluid at rest)
+    # As t→∞: ramp→1 → u=parabola(y)*inlet_vel, same as steady-state BC
     inlet_parabola = parabola(
         y, inter_1=channel_width[0], inter_2=channel_width[1], height=inlet_vel
     )
     inlet_constraint = PointwiseBoundaryConstraint(
         nodes=nodes,
         geometry=inlet,
-        outvar={"u": inlet_parabola, "v": 0, "c": 0},
+        outvar={"u": inlet_parabola * ramp, "v": 0, "c": 0},
         batch_size=cfg.batch_size.inlet,
         parameterization=time_range,
     )
@@ -169,11 +177,14 @@ def run(cfg: PhysicsNeMoConfig) -> None:
     )
     domain.add_constraint(outlet_constraint, "outlet")
 
-    # heat_sink wall
+    # heat_sink wall — temperature ramp-up: c(t) = c_wall * ramp(t)
+    # At t=0: ramp=0 → c=0, compatible with IC (ambient temperature)
+    # As t→∞: ramp→1 → c=c_wall, same as steady-state BC
+    c_wall = (heat_sink_temp - base_temp) / 273.15
     hs_wall = PointwiseBoundaryConstraint(
         nodes=nodes,
         geometry=heat_sink,
-        outvar={"u": 0, "v": 0, "c": (heat_sink_temp - base_temp) / 273.15},
+        outvar={"u": 0, "v": 0, "c": c_wall * ramp},
         batch_size=cfg.batch_size.hs_wall,
         parameterization=time_range,
     )
@@ -256,7 +267,7 @@ def run(cfg: PhysicsNeMoConfig) -> None:
     integral_continuity = IntegralBoundaryConstraint(
         nodes=nodes,
         geometry=integral_line,
-        outvar={"normal_dot_vel": 1},
+        outvar={"normal_dot_vel": 1 * ramp},
         batch_size=cfg.batch_size.num_integral_continuity,
         integral_batch_size=cfg.batch_size.integral_continuity,
         lambda_weighting={"normal_dot_vel": 0.1},

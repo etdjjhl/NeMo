@@ -70,8 +70,8 @@ def run(cfg: PhysicsNeMoConfig) -> None:
 
     # Smooth ramp function: r(t) = 1 - exp(-t/tau)
     # r(0) = 0 exactly (compatible with IC), r(3*tau) ≈ 0.95, r(5*tau) ≈ 0.99
-    # tau=1.0 → ~95% at t=3s, ~99.3% at t=5s, effectively steady by t=10s
-    tau = 1.0
+    # Default tau=0.4 → ~95% at t=1.2s, ~99.3% at t=2s, fully steady well before t_max
+    tau = cfg.custom.get("ramp_tau", 0.4)
     ramp = 1 - exp(-t_symbol / tau)
 
     # ── Sympy spatial variables ───────────────────────────────────────────────

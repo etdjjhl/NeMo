@@ -41,3 +41,4 @@ batch_size:
 
 custom:
   transient: true
+  ramp_tau: 0.4        # smooth start time constant (seconds); r(t)=1-exp(-t/tau)

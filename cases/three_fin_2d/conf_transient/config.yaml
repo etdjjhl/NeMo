@@ -27,17 +27,18 @@ training:
   rec_constraint_freq: 2000
   max_steps: 800000
 
+# Batch sizes tuned for RTX 4090 24GB (~45k samples/step, ~20-22GB peak)
 batch_size:
-  inlet: 96
-  outlet: 96
-  hs_wall: 750
-  channel_wall: 3750
-  interior_flow: 3600
-  interior_heat: 3600
-  ic_flow: 2400
-  ic_heat: 2400
-  integral_continuity: 128
-  num_integral_continuity: 4
+  inlet: 256
+  outlet: 256
+  hs_wall: 1792
+  channel_wall: 8750
+  interior_flow: 9500
+  interior_heat: 9500
+  ic_flow: 6400
+  ic_heat: 6400
+  integral_continuity: 224
+  num_integral_continuity: 10
 
 custom:
   transient: true

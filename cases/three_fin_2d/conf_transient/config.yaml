@@ -1,0 +1,45 @@
+# SPDX-FileCopyrightText: Copyright (c) 2023 - 2024 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-FileCopyrightText: All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Transient (time-parameterized) PINN configuration for three-fin 2D heat sink.
+# The model learns the full temporal evolution from quiescent IC to steady state.
+
+defaults :
+  - physicsnemo_default
+  - arch:
+      - fully_connected
+  - optimizer : adam
+  - scheduler : tf_exponential_lr
+  - loss : sum
+  - _self_
+
+jit: false
+
+scheduler:
+  decay_rate: 0.95
+  decay_steps: 5000
+
+training:
+  rec_validation_freq: 1000
+  rec_inference_freq: 1000
+  rec_monitor_freq: 1000
+  rec_constraint_freq: 2000
+  max_steps: 800000
+
+# Batch sizes tuned for RTX 4090 24GB (~45k samples/step, ~20-22GB peak)
+batch_size:
+  inlet: 256
+  outlet: 256
+  hs_wall: 1792
+  channel_wall: 8750
+  interior_flow: 9500
+  interior_heat: 9500
+  ic_flow: 6400
+  ic_heat: 6400
+  integral_continuity: 224
+  num_integral_continuity: 10
+
+custom:
+  transient: true
+  ramp_tau: 0.4        # smooth start time constant (seconds); r(t)=1-exp(-t/tau)

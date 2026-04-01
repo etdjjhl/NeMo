@@ -38,8 +38,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir",   required=True,  help="Output directory for this run")
     p.add_argument("--max-steps", type=int, default=10_000, help="Training steps (default 10000)")
     p.add_argument("--seed",      type=int, default=42,     help="Random seed (default 42)")
-    p.add_argument("--mode",      choices=["baseline", "param"], default="baseline",
-                   help="baseline=original heat_sink.py; param=heat_sink_param.py (default baseline)")
+    p.add_argument("--mode",      choices=["baseline", "param", "transient"], default="baseline",
+                   help="baseline=original heat_sink.py; param=heat_sink_param.py; transient=heat_sink_transient.py (default baseline)")
     p.add_argument("--local-disk", default="",
                    help="Fast local disk path (e.g. /home/featurize/data). "
                         "Training outputs symlinked there for I/O speed, copied back after.")
@@ -344,6 +344,51 @@ def run_heat_sink_param(case_dir: str, max_steps: int, out_dir: str, local_disk:
         raise RuntimeError(f"heat_sink_param.py exited with code {result.returncode}")
 
 
+def run_heat_sink_transient(case_dir: str, max_steps: int, out_dir: str, local_disk: str = "") -> None:
+    """Run heat_sink_transient.py as a subprocess from within case_dir."""
+    case_dir = os.path.abspath(case_dir)
+    heat_sink_path = os.path.join(case_dir, "heat_sink_transient.py")
+
+    if not os.path.isfile(heat_sink_path):
+        raise FileNotFoundError(f"heat_sink_transient.py not found at {heat_sink_path}")
+
+    freq = max(100, max_steps // 20)
+    hydra_run_dir = "outputs/run_transient"
+
+    overrides = [
+        f"training.max_steps={max_steps}",
+        f"training.rec_monitor_freq={freq}",
+        f"training.rec_validation_freq={freq}",
+        f"training.rec_inference_freq={freq}",
+        f"hydra.run.dir={hydra_run_dir}",
+    ]
+
+    # Setup local-disk symlink if requested
+    local_train_dir = _setup_local_symlink(case_dir, hydra_run_dir, local_disk, "transient")
+
+    cmd = [sys.executable, heat_sink_path] + overrides
+    print(f"[run_case] Running: {' '.join(cmd)}")
+    print(f"[run_case] cwd: {case_dir}")
+
+    try:
+        result = subprocess.run(cmd, cwd=case_dir)
+    finally:
+        # Teardown: replace symlink with real copy
+        _teardown_local_symlink(case_dir, hydra_run_dir, local_train_dir)
+
+    # Copy hydra outputs from case_dir into out_dir for archival
+    src = os.path.join(case_dir, hydra_run_dir)
+    if os.path.isdir(src):
+        dst = os.path.join(out_dir, "hydra_outputs")
+        if os.path.exists(dst):
+            shutil.rmtree(dst)
+        shutil.copytree(src, dst)
+        print(f"[run_case] Copied hydra outputs: {src} → {dst}")
+
+    if result.returncode != 0:
+        raise RuntimeError(f"heat_sink_transient.py exited with code {result.returncode}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 6. Parse monitor logs
 # ─────────────────────────────────────────────────────────────────────────────
@@ -602,7 +647,8 @@ def generate_baseline_report(
     lines: list[str] = []
     w = lines.append
 
-    title_tag = " [Parameterized]" if mode == "param" else ""
+    mode_titles = {"param": " [Parameterized]", "transient": " [Transient]"}
+    title_tag = mode_titles.get(mode, "")
     w(f"# PhysicsNeMo Sym — Baseline Report{title_tag}")
     w("")
     w(f"**Generated:** {datetime.utcnow().isoformat()}Z")
@@ -779,7 +825,11 @@ def main() -> None:
     # Run training (capture error for report but don't crash immediately)
     run_error: str | None = None
     try:
-        if args.mode == "param":
+        if args.mode == "transient":
+            print(f"[run_case] Starting heat_sink_transient training...")
+            run_heat_sink_transient(args.case_dir, args.max_steps, out_dir, local_disk)
+            print(f"[run_case] heat_sink_transient training complete.")
+        elif args.mode == "param":
             print(f"[run_case] Starting heat_sink_param training...")
             run_heat_sink_param(args.case_dir, args.max_steps, out_dir, local_disk)
             print(f"[run_case] heat_sink_param training complete.")
